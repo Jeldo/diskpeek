@@ -137,8 +137,10 @@ impl App {
     }
 
     fn back(&mut self) {
-        if self.view == View::Browse {
-            self.reveal(self.cwd);
+        match self.view {
+            View::Browse => self.reveal(self.cwd),
+            // 모아 보기에서는 들어오기 전의 탐색 위치로 돌아간다.
+            View::Candidates | View::LargeFiles => self.view = View::Browse,
         }
     }
 
@@ -330,14 +332,26 @@ mod tests {
         let mut app = app();
         press(&mut app, &[ToggleCandidates, ToggleLargeFiles]);
         assert_eq!(app.view, View::LargeFiles);
-        press(&mut app, &[Back]);
-        assert_eq!(app.view, View::LargeFiles);
         press(&mut app, &[ToggleCandidates]);
-        assert_eq!(app.view, View::Candidates);
-        press(&mut app, &[Back]);
         assert_eq!(app.view, View::Candidates);
         press(&mut app, &[ToggleLargeFiles, ToggleLargeFiles]);
         assert_eq!(app.view, View::Browse);
+    }
+
+    #[test]
+    fn back_leaves_collected_views_and_keeps_browse_position() {
+        let mut app = app();
+        press(&mut app, &[Down, Enter, Down, Down]);
+
+        press(&mut app, &[ToggleCandidates, Back]);
+        assert_eq!(app.view, View::Browse);
+        assert_eq!(app.cwd, find(&app.tree, "proj"));
+        assert_eq!(app.selected, 2);
+
+        press(&mut app, &[ToggleLargeFiles, Back]);
+        assert_eq!(app.view, View::Browse);
+        assert_eq!(app.cwd, find(&app.tree, "proj"));
+        assert_eq!(app.selected, 2);
     }
 
     #[test]

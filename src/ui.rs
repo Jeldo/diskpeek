@@ -13,9 +13,9 @@ use crate::format::{bar, display_path, format_size};
 use crate::tree::{NodeId, NodeKind};
 
 const TITLE: &str = " storage-manager  ";
-const BROWSE_KEYS: &str = "↑↓ 이동   Enter 들어가기   ← 상위   c 정리 후보   f 큰 파일   q 종료";
-const CANDIDATE_KEYS: &str = "↑↓ 이동   Enter 해당 위치로 이동   c 탐색으로 돌아가기   q 종료";
-const LARGE_FILE_KEYS: &str = "↑↓ 이동   Enter 해당 위치로 이동   f 탐색으로 돌아가기   q 종료";
+const BROWSE_KEYS: &str = "↑↓ 이동   Enter 들어가기   Esc 상위   c 정리 후보   f 큰 파일   q 종료";
+const CANDIDATE_KEYS: &str = "↑↓ 이동   Enter 해당 위치로 이동   Esc 탐색으로 돌아가기   q 종료";
+const LARGE_FILE_KEYS: &str = "↑↓ 이동   Enter 해당 위치로 이동   Esc 탐색으로 돌아가기   q 종료";
 
 /// 크기 칸의 폭. "999.9 GB"보다 넉넉하게 잡는다.
 const SIZE_WIDTH: usize = 10;
@@ -31,7 +31,7 @@ pub fn action_for(key: KeyEvent) -> Option<Action> {
         KeyCode::Up | KeyCode::Char('k' | 'K' | 'ㅏ') => Some(Action::Up),
         KeyCode::Down | KeyCode::Char('j' | 'J' | 'ㅓ') => Some(Action::Down),
         KeyCode::Enter | KeyCode::Right => Some(Action::Enter),
-        KeyCode::Left | KeyCode::Backspace => Some(Action::Back),
+        KeyCode::Esc | KeyCode::Left | KeyCode::Backspace => Some(Action::Back),
         KeyCode::Char('c' | 'C' | 'ㅊ') => Some(Action::ToggleCandidates),
         KeyCode::Char('f' | 'F' | 'ㄹ') => Some(Action::ToggleLargeFiles),
         KeyCode::Char('q' | 'Q' | 'ㅂ') => Some(Action::Quit),
@@ -299,6 +299,16 @@ mod tests {
     }
 
     #[test]
+    fn footers_name_esc_as_the_back_key() {
+        let mut app = app();
+        assert_contains(&screen(&app, 100, 20), &["Esc상위"]);
+        press(&mut app, &[ToggleCandidates]);
+        assert_contains(&screen(&app, 100, 20), &["Esc탐색으로돌아가기"]);
+        press(&mut app, &[ToggleLargeFiles]);
+        assert_contains(&screen(&app, 100, 20), &["Esc탐색으로돌아가기"]);
+    }
+
+    #[test]
     fn skipped_count_shown() {
         let mut app = app();
         app.tree.skipped = 3;
@@ -434,6 +444,7 @@ mod tests {
         assert_eq!(key(KeyCode::Right), Some(Enter));
         assert_eq!(key(KeyCode::Left), Some(Back));
         assert_eq!(key(KeyCode::Backspace), Some(Back));
+        assert_eq!(key(KeyCode::Esc), Some(Back));
         assert_eq!(key(KeyCode::Char('c')), Some(ToggleCandidates));
         assert_eq!(key(KeyCode::Char('f')), Some(ToggleLargeFiles));
         assert_eq!(key(KeyCode::Char('q')), Some(Quit));
