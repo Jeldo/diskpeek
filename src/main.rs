@@ -10,11 +10,11 @@ use std::time::Duration;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
 
-use storage_analyzer::app::{Action, App};
-use storage_analyzer::format::display_path;
-use storage_analyzer::scan::{self, Progress};
-use storage_analyzer::tree::Tree;
-use storage_analyzer::ui;
+use diskpeek::app::{Action, App};
+use diskpeek::format::display_path;
+use diskpeek::scan::{self, Progress};
+use diskpeek::tree::Tree;
+use diskpeek::ui;
 
 fn main() -> ExitCode {
     // 여기서 끝나는 오류는 터미널 화면을 바꾸기 전에 처리한다.
@@ -25,7 +25,7 @@ fn main() -> ExitCode {
     }
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     if args.len() > 1 {
-        eprintln!("사용법: storage-analyzer [경로]");
+        eprintln!("사용법: diskpeek [경로]");
         return ExitCode::from(2);
     }
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {

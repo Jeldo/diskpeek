@@ -1,10 +1,10 @@
 [package]
-name = "storage-analyzer"
+name = "diskpeek"
 version = "0.1.0"
 edition = "2024"
 description = "macOS에서 무엇이 저장공간을 차지하는지 터미널에서 보여주는 읽기 전용 분석 도구"
 license = "MIT"
-repository = "https://github.com/Jeldo/storage-analyzer"
+repository = "https://github.com/Jeldo/diskpeek"
 
 [dependencies]
 ratatui = "0.30.2"

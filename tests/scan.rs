@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::Ordering;
 
-use storage_analyzer::classify::Category;
-use storage_analyzer::scan::{Progress, is_dataless, scan};
-use storage_analyzer::tree::{Node, NodeKind, Tree};
+use diskpeek::classify::Category;
+use diskpeek::scan::{Progress, is_dataless, scan};
+use diskpeek::tree::{Node, NodeKind, Tree};
 
 const KIB: usize = 1024;
 const MIB: usize = 1024 * 1024;
