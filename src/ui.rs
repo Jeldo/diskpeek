@@ -25,14 +25,16 @@ pub fn action_for(key: KeyEvent) -> Option<Action> {
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return (key.code == KeyCode::Char('c')).then_some(Action::Quit);
     }
+    // 글자 키는 대문자(Caps Lock, Shift)와, 한글 입력 상태에서 같은 자리의
+    // 키를 눌렀을 때 들어오는 두벌식 자모도 함께 받는다.
     match key.code {
-        KeyCode::Up | KeyCode::Char('k') => Some(Action::Up),
-        KeyCode::Down | KeyCode::Char('j') => Some(Action::Down),
+        KeyCode::Up | KeyCode::Char('k' | 'K' | 'ㅏ') => Some(Action::Up),
+        KeyCode::Down | KeyCode::Char('j' | 'J' | 'ㅓ') => Some(Action::Down),
         KeyCode::Enter | KeyCode::Right => Some(Action::Enter),
         KeyCode::Left | KeyCode::Backspace => Some(Action::Back),
-        KeyCode::Char('c') => Some(Action::ToggleCandidates),
-        KeyCode::Char('f') => Some(Action::ToggleLargeFiles),
-        KeyCode::Char('q') => Some(Action::Quit),
+        KeyCode::Char('c' | 'C' | 'ㅊ') => Some(Action::ToggleCandidates),
+        KeyCode::Char('f' | 'F' | 'ㄹ') => Some(Action::ToggleLargeFiles),
+        KeyCode::Char('q' | 'Q' | 'ㅂ') => Some(Action::Quit),
         _ => None,
     }
 }
@@ -436,6 +438,19 @@ mod tests {
         assert_eq!(key(KeyCode::Char('f')), Some(ToggleLargeFiles));
         assert_eq!(key(KeyCode::Char('q')), Some(Quit));
         assert_eq!(key(KeyCode::Char('x')), None);
+        // 한글 입력 상태에서 같은 자리의 키를 눌렀을 때 (두벌식)
+        assert_eq!(key(KeyCode::Char('ㅊ')), Some(ToggleCandidates));
+        assert_eq!(key(KeyCode::Char('ㄹ')), Some(ToggleLargeFiles));
+        assert_eq!(key(KeyCode::Char('ㅂ')), Some(Quit));
+        assert_eq!(key(KeyCode::Char('ㅓ')), Some(Down));
+        assert_eq!(key(KeyCode::Char('ㅏ')), Some(Up));
+        // Caps Lock이나 Shift가 눌린 상태
+        let shifted = |ch| action_for(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::SHIFT));
+        assert_eq!(shifted('C'), Some(ToggleCandidates));
+        assert_eq!(shifted('F'), Some(ToggleLargeFiles));
+        assert_eq!(shifted('Q'), Some(Quit));
+        assert_eq!(shifted('J'), Some(Down));
+        assert_eq!(shifted('K'), Some(Up));
         assert_eq!(
             action_for(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
             Some(Quit)

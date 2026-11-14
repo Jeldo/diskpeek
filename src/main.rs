@@ -18,6 +18,11 @@ use storage_manager::ui;
 
 fn main() -> ExitCode {
     // 여기서 끝나는 오류는 터미널 화면을 바꾸기 전에 처리한다.
+    // 경로를 확인하는 것도 디스크를 읽는 일이므로 읽기 전용 설정을 가장 먼저 적용한다.
+    if let Err(err) = scan::set_read_only_io_policy() {
+        eprintln!("읽기 전용 설정을 적용할 수 없습니다: {err}");
+        return ExitCode::FAILURE;
+    }
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     if args.len() > 1 {
         eprintln!("사용법: storage-manager [경로]");
@@ -37,8 +42,6 @@ fn main() -> ExitCode {
         eprintln!("폴더가 아닙니다: {}", requested.display());
         return ExitCode::FAILURE;
     }
-
-    scan::disable_dataless_materialization();
 
     // `init`은 panic이 나도 터미널을 복구하는 훅을 함께 설치한다.
     let mut terminal = ratatui::init();

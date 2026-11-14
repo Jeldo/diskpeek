@@ -221,3 +221,67 @@ fn real_dir_matches_du() {
     );
     assert!(ours.abs_diff(du) <= du / 100, "ours {ours} vs du {du}");
 }
+
+fn timestamps(path: &Path) -> (i64, i64, i64) {
+    let meta = fs::symlink_metadata(path).unwrap();
+    (meta.atime(), meta.mtime(), meta.ctime())
+}
+
+/// 폴더 목록을 읽기만 해도 macOS는 접근 시각을 디스크에 기록한다. 스캔은 그것도 하지 않아야 한다.
+#[test]
+fn scan_leaves_timestamps_untouched() {
+    let (_tmp, root) = temp_root();
+    write(&root, "a", 4 * KIB);
+    write(&root, "sub/deep/file", 4 * KIB);
+    let paths = [
+        root.clone(),
+        root.join("a"),
+        root.join("sub"),
+        root.join("sub/deep"),
+        root.join("sub/deep/file"),
+    ];
+    let touched = Command::new("touch").args(["-a", "-t", "202001010000"]).args(&paths).status().unwrap();
+    assert!(touched.success());
+    let before: Vec<_> = paths.iter().map(|path| timestamps(path)).collect();
+    assert!(before.iter().all(|&(atime, _, _)| atime < 1_600_000_000), "touch did not set atime");
+
+    scan_ok(&root, &root);
+
+    let after: Vec<_> = paths.iter().map(|path| timestamps(path)).collect();
+    assert_eq!(before, after);
+}
+
+/// 스캔은 클라우드 항목 내려받기와 접근 시각 기록을 프로세스 단위로 꺼야 한다.
+#[test]
+fn scan_turns_off_writes_caused_by_reading() {
+    unsafe extern "C" {
+        fn getiopolicy_np(iotype: i32, scope: i32) -> i32;
+    }
+    const PROCESS: i32 = 0;
+    const ATIME_UPDATES: i32 = 2;
+    const MATERIALIZE_DATALESS_FILES: i32 = 3;
+    const OFF: i32 = 1;
+    let (_tmp, root) = temp_root();
+
+    scan_ok(&root, &root);
+
+    // SAFETY: 정수 인자만 받고 현재 설정값을 돌려주는 libSystem 함수다.
+    unsafe {
+        assert_eq!(getiopolicy_np(ATIME_UPDATES, PROCESS), OFF);
+        assert_eq!(getiopolicy_np(MATERIALIZE_DATALESS_FILES, PROCESS), OFF);
+    }
+}
+
+/// 목록은 읽히지만 항목을 조회할 수 없는 폴더(읽기만 가능, 진입 불가)도 건너뛴 것으로 센다.
+#[test]
+fn unsearchable_dir_is_counted_as_skipped() {
+    let (_tmp, root) = temp_root();
+    write(&root, "listed/secret", MIB);
+    let listed = root.join("listed");
+    fs::set_permissions(&listed, fs::Permissions::from_mode(0o444)).unwrap();
+
+    let result = scan(&root, &root, &Progress::default());
+    fs::set_permissions(&listed, fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert_eq!(result.unwrap().skipped, 1);
+}

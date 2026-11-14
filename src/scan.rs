@@ -25,32 +25,42 @@ pub fn is_dataless(st_flags: u32) -> bool {
     st_flags & SF_DATALESS != 0
 }
 
-/// 이 프로세스가 클라우드 항목의 내려받기를 일으키지 않게 한다.
+/// 이 프로세스가 디스크를 읽는 것만으로는 디스크가 바뀌지 않게 한다.
 ///
-/// 내려받지 않은 폴더는 목록을 읽는 것만으로 macOS가 내용을 내려받아 디스크에
-/// 쓸 수 있다. 스캔은 그런 폴더에 들어가지 않지만, 이 설정이 그것을 보장한다.
-pub fn disable_dataless_materialization() {
-    const IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES: i32 = 3;
+/// macOS는 읽기만 해도 두 가지를 디스크에 쓴다. 폴더 목록을 읽으면 접근 시각을
+/// 기록하고, 아직 내려받지 않은 클라우드 폴더의 목록을 읽으면 내용을 내려받는다.
+/// 둘 다 프로세스 단위로 끈다. 여러 번 호출해도 된다.
+pub fn set_read_only_io_policy() -> io::Result<()> {
     const IOPOL_SCOPE_PROCESS: i32 = 0;
+    const IOPOL_TYPE_VFS_ATIME_UPDATES: i32 = 2;
+    const IOPOL_ATIME_UPDATES_OFF: i32 = 1;
+    const IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES: i32 = 3;
     const IOPOL_MATERIALIZE_DATALESS_FILES_OFF: i32 = 1;
 
     unsafe extern "C" {
         fn setiopolicy_np(iotype: i32, scope: i32, policy: i32) -> i32;
     }
 
-    // SAFETY: 정수 인자만 받는 libSystem 함수이고, 실패하면 -1을 돌려줄 뿐이다.
-    unsafe {
-        setiopolicy_np(
-            IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES,
-            IOPOL_SCOPE_PROCESS,
-            IOPOL_MATERIALIZE_DATALESS_FILES_OFF,
-        );
+    for (iotype, policy) in [
+        (IOPOL_TYPE_VFS_ATIME_UPDATES, IOPOL_ATIME_UPDATES_OFF),
+        (IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_MATERIALIZE_DATALESS_FILES_OFF),
+    ] {
+        // SAFETY: 정수 인자만 받는 libSystem 함수이고, 실패하면 -1을 돌려주고 errno를 설정한다.
+        if unsafe { setiopolicy_np(iotype, IOPOL_SCOPE_PROCESS, policy) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
     }
+    Ok(())
 }
 
 /// `/`를 스캔할 때 `/System/Volumes/Data`는 같은 데이터가 한 번 더 보이는 경로다.
 fn is_duplicate_data_volume(root: &Path, dir: &Path) -> bool {
     root == Path::new("/") && dir == Path::new("/System/Volumes/Data")
+}
+
+/// 폴더 안으로 들어가도 되는지 판단한다. 들어가지 않는 폴더도 노드는 만든다.
+fn should_descend(root: &Path, root_dev: u64, dir: &Path, dev: u64, st_flags: u32) -> bool {
+    dev == root_dev && !is_dataless(st_flags) && !is_duplicate_data_volume(root, dir)
 }
 
 /// 아직 처리하지 않은 폴더.
@@ -62,8 +72,10 @@ struct Pending {
 
 /// `root` 아래를 모두 읽어 트리를 만든다.
 ///
-/// `root`는 정규화된 절대 경로여야 한다. `root` 자체를 읽지 못할 때만 `Err`를 돌려준다.
+/// `root`는 정규화된 절대 경로여야 한다. `root` 자체를 읽지 못하거나 읽기 전용
+/// 설정을 적용하지 못할 때만 `Err`를 돌려준다.
 pub fn scan(root: &Path, home: &Path, progress: &Progress) -> io::Result<Tree> {
+    set_read_only_io_policy()?;
     let root_meta = fs::symlink_metadata(root)?;
     let root_dev = root_meta.st_dev();
     let mut tree = Tree::new(root.to_path_buf(), disk_size(&root_meta));
@@ -104,10 +116,7 @@ pub fn scan(root: &Path, home: &Path, progress: &Progress) -> io::Result<Tree> {
                 if !dir.inside_candidate {
                     category = classify(&path, home);
                 }
-                let descend = meta.st_dev() == root_dev
-                    && !is_dataless(meta.st_flags())
-                    && !is_duplicate_data_volume(root, &path);
-                if descend {
+                if should_descend(root, root_dev, &path, meta.st_dev(), meta.st_flags()) {
                     subdirs.push((index, path, dir.inside_candidate || category.is_some()));
                 }
                 NodeKind::Dir
@@ -145,7 +154,8 @@ fn disk_size(meta: &Metadata) -> u64 {
 
 /// 폴더의 항목을 이름의 바이트 순서로 정렬해서 돌려준다.
 ///
-/// 두 번째 값은 목록을 끝까지 읽었는지 여부다. 스캔 도중 사라진 항목은 조용히 버린다.
+/// 두 번째 값은 모든 항목을 읽었는지 여부다. 읽지 못한 항목이 있으면 `false`다.
+/// 스캔 도중 사라진 항목은 읽지 못한 것으로 보지 않고 조용히 버린다.
 fn read_entries(dir: &Path) -> io::Result<(Vec<(OsString, Metadata)>, bool)> {
     let mut entries = Vec::new();
     let mut complete = true;
@@ -155,8 +165,10 @@ fn read_entries(dir: &Path) -> io::Result<(Vec<(OsString, Metadata)>, bool)> {
             break;
         };
         // `DirEntry::metadata`는 심볼릭 링크를 따라가지 않는다.
-        if let Ok(meta) = entry.metadata() {
-            entries.push((entry.file_name(), meta));
+        match entry.metadata() {
+            Ok(meta) => entries.push((entry.file_name(), meta)),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => complete = false,
         }
     }
     entries.sort_by(|a, b| a.0.cmp(&b.0));
@@ -166,6 +178,21 @@ fn read_entries(dir: &Path) -> io::Result<(Vec<(OsString, Metadata)>, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn descends_only_into_local_downloaded_folders() {
+        let root = Path::new("/Users/a");
+        let dir = Path::new("/Users/a/x");
+        assert!(should_descend(root, 1, dir, 1, 0));
+        assert!(should_descend(root, 1, dir, 1, 0x20));
+        // 다른 볼륨
+        assert!(!should_descend(root, 1, dir, 2, 0));
+        // 아직 내려받지 않은 클라우드 폴더
+        assert!(!should_descend(root, 1, dir, 1, SF_DATALESS));
+        assert!(!should_descend(root, 1, dir, 1, SF_DATALESS | 0x20));
+        // `/`에서 본 데이터 볼륨
+        assert!(!should_descend(Path::new("/"), 1, Path::new("/System/Volumes/Data"), 1, 0));
+    }
 
     #[test]
     fn data_volume_is_skipped_only_when_scanning_root() {
