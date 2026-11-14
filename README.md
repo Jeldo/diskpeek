@@ -1,85 +1,124 @@
 # diskpeek
 
-macOS에서 어떤 파일과 폴더가 저장공간을 차지하는지 터미널에서 보여주는 분석 도구입니다.
+A terminal tool for macOS that shows which files and folders are using your disk space.
 
-**읽기 전용입니다.** 파일 메타데이터와 폴더 목록만 읽습니다. 삭제, 이동, 수정 기능이 없고 설정 파일이나 캐시 파일도 만들지 않습니다. 무엇을 지울지는 화면을 보고 직접 판단해서 Finder나 터미널에서 지웁니다.
+**Read-only.** It only reads file metadata and directory listings. There is no delete, move, or edit feature, and it creates no config or cache files. You decide what to remove by looking at the screen, then delete it yourself in Finder or the terminal.
 
-## 실행
+## Install
 
-Rust 1.96 이상이 필요합니다.
+### Prebuilt binary
+
+Download the archive for your Mac from the [Releases](https://github.com/Jeldo/diskpeek/releases) page.
+
+| Mac | Archive |
+|---|---|
+| Apple silicon | `diskpeek-aarch64-apple-darwin.tar.gz` |
+| Intel | `diskpeek-x86_64-apple-darwin.tar.gz` |
 
 ```sh
-cargo run --release              # 홈 폴더(~)를 스캔
-cargo run --release -- <경로>    # 지정한 폴더를 스캔
+tar xzf diskpeek-aarch64-apple-darwin.tar.gz
+cd diskpeek-aarch64-apple-darwin
+./diskpeek ~/Github
 ```
 
-설치해서 쓰려면 다음을 실행합니다.
+The binary is not code-signed. If you downloaded it with a browser and macOS refuses to open it, remove the quarantine flag:
+
+```sh
+xattr -d com.apple.quarantine ./diskpeek
+```
+
+Move `diskpeek` to a folder on your `PATH` (for example `/usr/local/bin`) to run it from anywhere.
+
+### From source
+
+Requires Rust 1.96 or later.
 
 ```sh
 cargo install --path .
 diskpeek ~/Github
 ```
 
-실행할 때마다 처음부터 스캔하고 결과를 저장하지 않습니다. 실행 중에 파일이 바뀐 것은 자동으로 반영되지 않으며, `r`을 누르면 다시 스캔합니다. 스캔하는 동안에는 읽은 파일 수와 용량이 표시됩니다. 폴더는 스레드 4개로 나눠 읽으며, 최근에 읽은 적이 있는 폴더는 약 15만 개에 1초 안팎이 걸리고 처음 읽을 때는 더 걸립니다.
+To run without installing:
 
-## 화면
+```sh
+cargo run --release              # scan your home folder (~)
+cargo run --release -- <path>    # scan the given folder
+```
 
-| 화면 | 여는 키 | 내용 |
+## Usage
+
+```sh
+diskpeek [path]    # defaults to ~
+```
+
+Every run scans from scratch and nothing is saved. Changes made while it is running are not picked up automatically; press `r` to scan again. While scanning, it shows the number of files read and their total size. Folders are read on four threads. A recently read tree of about 150,000 folders takes around a second, and the first read takes longer.
+
+## Screens
+
+| Screen | Key | Contents |
 |---|---|---|
-| 탐색 | 시작 화면 | 현재 폴더의 항목을 크기순으로 표시합니다. 정리 후보 폴더에는 종류 태그가 붙습니다. |
-| 정리 후보 | `c` | 스캔한 범위 전체에서 찾은 정리 후보를 종류별, 크기순으로 모아 보여줍니다. |
-| 큰 파일 | `f` | 정리 후보 폴더 밖에 있는 일반 파일 중 가장 큰 100개를 보여줍니다. |
+| Browse | start screen | Items in the current folder, sorted by size. Cleanup candidate folders carry a kind tag. |
+| Cleanup candidates | `c` | All cleanup candidates found in the scanned tree, grouped by kind and sorted by size. |
+| Large files | `f` | The 100 largest regular files that are not inside a cleanup candidate folder. |
 
-## 키
+## Keys
 
-| 키 | 동작 |
+| Key | Action |
 |---|---|
-| `↑` `↓` 또는 `k` `j` | 선택 이동 |
-| `Enter` 또는 `→` | 탐색: 폴더로 들어가기. 정리 후보와 큰 파일: 탐색 화면의 해당 위치로 이동 |
-| `Esc`, `←` 또는 `Backspace` | 탐색: 상위 폴더로. 정리 후보와 큰 파일: 탐색으로 돌아가기 |
-| `c` | 정리 후보 화면을 열고, 다시 누르면 탐색으로 돌아가기 |
-| `f` | 큰 파일 화면을 열고, 다시 누르면 탐색으로 돌아가기 |
-| `r` | 처음부터 다시 스캔. 보던 화면과 선택한 항목을 유지하고, 보던 폴더가 사라졌으면 남아 있는 가장 가까운 상위 폴더로 이동 |
-| `q` 또는 `Ctrl+C` | 종료 |
+| `↑` `↓` or `k` `j` | Move selection |
+| `Enter` or `→` | Browse: open the folder. Cleanup candidates and large files: jump to that location in Browse |
+| `Esc`, `←` or `Backspace` | Browse: go to the parent folder. Cleanup candidates and large files: return to Browse |
+| `c` | Open the cleanup candidates screen; press again to return to Browse |
+| `f` | Open the large files screen; press again to return to Browse |
+| `r` | Rescan from scratch. Keeps the current screen and selection; if the folder you were viewing no longer exists, moves to the nearest surviving parent |
+| `q` or `Ctrl+C` | Quit |
 
-## 정리 후보
+Keys also work with the Korean (2-set) keyboard layout active.
 
-정리 후보는 "보통 다시 만들어지거나 다시 내려받을 수 있는 데이터"라는 뜻입니다. **지워도 안전하다는 보장이 아닙니다.** 지우기 전에 내용을 확인하세요.
+## Cleanup candidates
 
-확실한 경우에만 표시합니다. 알려진 고정 경로이거나, 같은 폴더에 프로젝트 표지 파일이 있을 때만 후보로 봅니다. `dist`, `out`, `bin`처럼 소스 코드가 들어 있을 수 있는 이름은 표시하지 않습니다.
+A cleanup candidate means "data that is usually regenerated or can be downloaded again". **It is not a guarantee that deleting it is safe.** Check the contents before you delete anything.
 
-| 종류 | 대상 |
+Only clear-cut cases are flagged: a known fixed path, or a folder with a project marker file next to it. Names that may hold source code, such as `dist`, `out`, and `bin`, are never flagged.
+
+| Kind | Matches |
 |---|---|
-| 캐시 | `~/Library/Caches`, `~/.cache`, `~/.npm`, `~/.yarn/cache`, `~/Library/pnpm/store`, `~/.cargo/registry`, `~/.cargo/git`, `~/.gradle/caches`, `~/.m2/repository`, `~/go/pkg/mod` |
-| 빌드 산출물 | `node_modules`와 `.next`(옆에 `package.json`), `target`(옆에 `Cargo.toml` 또는 `pom.xml`), `build`(옆에 `build.gradle` 또는 `build.gradle.kts`), `Pods`(옆에 `Podfile`), `.venv`와 `venv`(안에 `pyvenv.cfg`), `__pycache__`, `~/Library/Developer/Xcode/DerivedData` |
-| 임시 데이터 | `~/Library/Logs`, `~/.Trash` |
+| Cache | `~/Library/Caches`, `~/.cache`, `~/.npm`, `~/.yarn/cache`, `~/Library/pnpm/store`, `~/.cargo/registry`, `~/.cargo/git`, `~/.gradle/caches`, `~/.m2/repository`, `~/go/pkg/mod` |
+| Build output | `node_modules` and `.next` (next to `package.json`), `target` (next to `Cargo.toml` or `pom.xml`), `build` (next to `build.gradle` or `build.gradle.kts`), `Pods` (next to `Podfile`), `.venv` and `venv` (containing `pyvenv.cfg`), `__pycache__`, `~/Library/Developer/Xcode/DerivedData` |
+| Temporary data | `~/Library/Logs`, `~/.Trash` |
 
-정리 후보 폴더의 안쪽은 다시 분류하지 않으므로 같은 용량이 합계에 두 번 들어가지 않습니다.
+The inside of a cleanup candidate folder is not classified again, so the same space is never counted twice in the totals.
 
-## 권한
+The kind tags and labels in the interface are displayed in Korean.
 
-macOS는 터미널 앱이 일부 폴더를 읽는 것을 막습니다. 읽지 못한 폴더는 건너뛰고, 탐색 화면 상단에 `건너뜀 N개`로 표시합니다. 건너뛴 폴더의 용량은 합계에 들어가지 않습니다.
+## Permissions
 
-- `~/Documents`, `~/Desktop`, `~/Downloads`에 처음 접근하면 macOS가 터미널 앱에 권한을 묻습니다.
-- `~/Library/Mail`, `~/.Trash` 등은 터미널 앱에 전체 디스크 접근 권한이 있어야 읽힙니다. **시스템 설정 → 개인정보 보호 및 보안 → 전체 디스크 접근 권한**에서 사용하는 터미널 앱을 추가합니다.
+macOS blocks terminal apps from reading some folders. Folders that cannot be read are skipped and counted in the header of the Browse screen as `건너뜀 N개` ("N skipped"). The size of skipped folders is not included in the totals.
 
-## 크기 계산과 알려진 한계
+- The first time you access `~/Documents`, `~/Desktop`, or `~/Downloads`, macOS asks whether to allow your terminal app.
+- `~/Library/Mail`, `~/.Trash`, and similar locations can only be read if your terminal app has Full Disk Access. Add it under **System Settings → Privacy & Security → Full Disk Access**.
 
-- 크기는 파일 길이가 아니라 실제 디스크 점유량이며, `du`와 같은 값입니다. 단위는 Finder와 같은 10진 단위(1 GB = 1,000,000,000바이트)입니다.
-- 심볼릭 링크는 따라가지 않습니다. 하드 링크로 연결된 같은 파일은 한 번만 세고, 이름순으로 먼저 나오는 경로에 용량을 계산합니다.
-- 시작 경로와 다른 볼륨(외장 디스크, 네트워크 드라이브)으로는 넘어가지 않습니다.
-- APFS의 복제 파일(clone)은 실제로는 공간을 공유하지만 각각 따로 계산됩니다. 그래서 합계가 실제 사용량보다 클 수 있습니다.
-- 아직 내려받지 않은 iCloud 등의 클라우드 폴더에는 들어가지 않습니다. 목록을 읽는 것만으로 내려받기가 시작될 수 있기 때문입니다. 이런 폴더는 크기가 0에 가깝게 표시됩니다.
-- 파일 변경을 자동으로 감지하지 않습니다. 최신 상태를 보려면 `r`을 눌러 다시 스캔합니다.
+## How sizes are calculated, and known limitations
 
-## 개발
+- Sizes are actual disk usage, not file length, and match `du`. Units are decimal like Finder (1 GB = 1,000,000,000 bytes).
+- Symbolic links are not followed. Files joined by hard links are counted once, under the path that sorts first by name.
+- It does not cross into other volumes (external disks, network drives) from the starting path.
+- APFS clones share space on disk but are counted separately, so totals can be larger than actual usage.
+- Cloud folders whose files are not downloaded yet, such as iCloud, are not entered, because listing them can trigger a download. They show a size close to zero.
+- File changes are not detected automatically. Press `r` to rescan for the latest state.
+
+## Development
 
 ```sh
 cargo test
 ```
 
-`tests/read_only.rs`는 제품 코드(`src/`)에 파일 쓰기, 삭제, 이동, 외부 프로세스 실행 호출이 없는지 검사합니다. 실제 폴더로 `du`와 결과를 비교하려면 다음을 실행합니다.
+`tests/read_only.rs` checks that the product code (`src/`) contains no calls that write, delete, or move files, or run external processes. To compare results against `du` on a real folder:
 
 ```sh
 SM_REAL_DIR=$HOME/Github cargo test --release --test scan real_dir -- --ignored --nocapture
 ```
+
+## License
+
+MIT
