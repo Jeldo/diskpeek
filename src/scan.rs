@@ -1,12 +1,14 @@
 //! 디스크 순회. 파일 메타데이터와 디렉터리 목록만 읽는다.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, Metadata};
 use std::io;
 use std::os::macos::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex};
+use std::thread;
 
 use crate::classify::classify;
 use crate::tree::{NewNode, NodeId, NodeKind, Tree};
@@ -63,11 +65,47 @@ fn should_descend(root: &Path, root_dev: u64, dir: &Path, dev: u64, st_flags: u3
     dev == root_dev && !is_dataless(st_flags) && !is_duplicate_data_volume(root, dir)
 }
 
+/// 폴더를 읽는 스레드 수. 성능 코어가 4개인 Mac에서 재 보니 그보다 늘려도 거의 빨라지지 않았다.
+const SCAN_THREADS: usize = 4;
+
 /// 아직 처리하지 않은 폴더.
 struct Pending {
     id: NodeId,
     path: PathBuf,
     inside_candidate: bool,
+}
+
+/// 폴더 하나를 읽은 결과. 트리에 넣기 전이라 자식들은 폴더 안에서의 순번으로 가리킨다.
+struct Listing {
+    children: Vec<NewNode>,
+    /// 들어가서 읽을 하위 폴더: (순번, 경로, 정리 후보 안쪽인지).
+    subdirs: Vec<(usize, PathBuf, bool)>,
+    /// 하드 링크가 둘 이상인 파일: (순번, (장치, inode)).
+    links: Vec<(usize, (u64, u64))>,
+    /// 모든 항목을 읽었는지.
+    complete: bool,
+}
+
+/// 스캔 스레드들이 함께 쓰는 상태.
+struct Shared {
+    tree: Tree,
+    pending: Vec<Pending>,
+    /// 지금 폴더를 읽고 있는 스레드 수. `pending`이 비었고 이 값이 0이면 스캔이 끝난 것이다.
+    active: usize,
+    /// 하드 링크가 둘 이상인 파일들. 스캔이 끝난 뒤 한 번만 세도록 정리한다.
+    links: HashMap<NodeId, (u64, u64)>,
+    /// 진행 상황의 용량에 같은 파일을 두 번 더하지 않기 위한 기록.
+    seen_links: HashSet<(u64, u64)>,
+}
+
+struct Scanner<'a> {
+    root: &'a Path,
+    home: &'a Path,
+    root_dev: u64,
+    progress: &'a Progress,
+    shared: Mutex<Shared>,
+    /// 읽을 폴더가 새로 생겼거나 스캔이 끝났음을 기다리는 스레드에게 알린다.
+    changed: Condvar,
 }
 
 /// `root` 아래를 모두 읽어 트리를 만든다.
@@ -77,74 +115,152 @@ struct Pending {
 pub fn scan(root: &Path, home: &Path, progress: &Progress) -> io::Result<Tree> {
     set_read_only_io_policy()?;
     let root_meta = fs::symlink_metadata(root)?;
-    let root_dev = root_meta.st_dev();
-    let mut tree = Tree::new(root.to_path_buf(), disk_size(&root_meta));
-    // 하드 링크로 연결된 파일을 한 번만 세기 위한 (장치, inode) 기록.
-    let mut seen_links: HashSet<(u64, u64)> = HashSet::new();
-
     // 루트를 읽지 못하면 스캔 전체가 실패한다. 그 아래의 폴더는 건너뛸 뿐이다.
-    let mut root_entries = Some(read_entries(root)?);
-    let mut pending =
-        vec![Pending { id: Tree::ROOT, path: root.to_path_buf(), inside_candidate: false }];
+    let root_entries = read_entries(root)?;
 
-    while let Some(dir) = pending.pop() {
-        let (entries, complete) = match root_entries.take() {
-            Some(entries) => entries,
-            None => match read_entries(&dir.path) {
-                Ok(entries) => entries,
-                Err(_) => {
-                    tree.skipped += 1;
-                    continue;
-                }
-            },
-        };
-        if !complete {
-            tree.skipped += 1;
+    let scanner = Scanner {
+        root,
+        home,
+        root_dev: root_meta.st_dev(),
+        progress,
+        shared: Mutex::new(Shared {
+            tree: Tree::new(root.to_path_buf(), disk_size(&root_meta)),
+            pending: Vec::new(),
+            active: 0,
+            links: HashMap::new(),
+            seen_links: HashSet::new(),
+        }),
+        changed: Condvar::new(),
+    };
+    let root_dir = Pending { id: Tree::ROOT, path: root.to_path_buf(), inside_candidate: false };
+    let listing = scanner.inspect(&root_dir, root_entries);
+    scanner.add(&mut scanner.shared.lock().unwrap(), &root_dir, listing);
+
+    thread::scope(|scope| {
+        for _ in 0..SCAN_THREADS {
+            scope.spawn(|| scanner.work());
         }
+    });
 
-        let mut children = Vec::with_capacity(entries.len());
-        let mut subdirs = Vec::new();
-        let mut bytes = 0;
+    let Shared { mut tree, links, .. } = scanner.shared.into_inner().unwrap();
+    count_links_once(&mut tree, &links);
+    tree.finalize();
+    Ok(tree)
+}
+
+impl Scanner<'_> {
+    /// 읽을 폴더가 남아 있는 동안 하나씩 꺼내 읽는다. 디스크를 읽는 동안에는 잠금을 잡지 않는다.
+    fn work(&self) {
+        let mut shared = self.shared.lock().unwrap();
+        loop {
+            let Some(dir) = shared.pending.pop() else {
+                if shared.active == 0 {
+                    return;
+                }
+                shared = self.changed.wait(shared).unwrap();
+                continue;
+            };
+            shared.active += 1;
+            drop(shared);
+
+            let listing = read_entries(&dir.path).map(|entries| self.inspect(&dir, entries));
+
+            shared = self.shared.lock().unwrap();
+            shared.active -= 1;
+            match listing {
+                Ok(listing) => self.add(&mut shared, &dir, listing),
+                Err(_) => shared.tree.skipped += 1,
+            }
+            self.changed.notify_all();
+        }
+    }
+
+    /// 폴더의 항목들을 노드로 바꾸고, 들어갈 하위 폴더와 하드 링크를 골라낸다.
+    fn inspect(&self, dir: &Pending, (entries, complete): (Vec<(OsString, Metadata)>, bool)) -> Listing {
+        let mut listing = Listing {
+            children: Vec::with_capacity(entries.len()),
+            subdirs: Vec::new(),
+            links: Vec::new(),
+            complete,
+        };
 
         for (index, (name, meta)) in entries.iter().enumerate() {
             let file_type = meta.file_type();
-            let mut size = disk_size(meta);
             let mut category = None;
 
             let kind = if file_type.is_dir() {
                 let path = dir.path.join(name);
                 if !dir.inside_candidate {
-                    category = classify(&path, home);
+                    category = classify(&path, self.home);
                 }
-                if should_descend(root, root_dev, &path, meta.st_dev(), meta.st_flags()) {
-                    subdirs.push((index, path, dir.inside_candidate || category.is_some()));
+                if should_descend(self.root, self.root_dev, &path, meta.st_dev(), meta.st_flags()) {
+                    listing.subdirs.push((index, path, dir.inside_candidate || category.is_some()));
                 }
                 NodeKind::Dir
             } else if file_type.is_file() {
-                if meta.st_nlink() > 1 && !seen_links.insert((meta.st_dev(), meta.st_ino())) {
-                    size = 0;
+                if meta.st_nlink() > 1 {
+                    listing.links.push((index, (meta.st_dev(), meta.st_ino())));
                 }
                 NodeKind::File
             } else {
                 NodeKind::Other
             };
 
-            bytes += size;
-            children.push(NewNode { name: name.to_string_lossy().into(), kind, size, category });
+            listing.children.push(NewNode {
+                name: name.to_string_lossy().into(),
+                kind,
+                size: disk_size(meta),
+                category,
+            });
         }
-
-        progress.files.fetch_add(children.len() as u64, Ordering::Relaxed);
-        progress.bytes.fetch_add(bytes, Ordering::Relaxed);
-        let ids = tree.add_children(dir.id, children);
-
-        // 스택이므로 역순으로 넣어야 이름순으로 꺼내진다.
-        for (index, path, inside_candidate) in subdirs.into_iter().rev() {
-            pending.push(Pending { id: ids.start + index as NodeId, path, inside_candidate });
-        }
+        listing
     }
 
-    tree.finalize();
-    Ok(tree)
+    /// 읽은 결과를 트리에 넣고, 하위 폴더를 읽을 목록에 올린다.
+    fn add(&self, shared: &mut Shared, dir: &Pending, listing: Listing) {
+        if !listing.complete {
+            shared.tree.skipped += 1;
+        }
+        let mut bytes: u64 = listing.children.iter().map(|child| child.size).sum();
+        for &(index, key) in &listing.links {
+            if !shared.seen_links.insert(key) {
+                bytes -= listing.children[index].size;
+            }
+        }
+        self.progress.files.fetch_add(listing.children.len() as u64, Ordering::Relaxed);
+        self.progress.bytes.fetch_add(bytes, Ordering::Relaxed);
+
+        let ids = shared.tree.add_children(dir.id, listing.children);
+        let id_of = |index: usize| ids.start + index as NodeId;
+        shared.links.extend(listing.links.into_iter().map(|(index, key)| (id_of(index), key)));
+        shared.pending.extend(listing.subdirs.into_iter().map(|(index, path, inside_candidate)| {
+            Pending { id: id_of(index), path, inside_candidate }
+        }));
+    }
+}
+
+/// 하드 링크로 연결된 같은 파일은 처음 나오는 것만 세고 나머지는 크기를 0으로 만든다.
+///
+/// 스레드들이 폴더를 읽는 순서는 실행마다 다르다. 그래서 스캔이 끝난 뒤 정해진
+/// 순서(폴더 단위로 깊이 우선, 폴더 안에서는 이름순)로 훑어 결과가 항상 같게 한다.
+fn count_links_once(tree: &mut Tree, links: &HashMap<NodeId, (u64, u64)>) {
+    if links.is_empty() {
+        return;
+    }
+    let mut seen = HashSet::new();
+    let mut pending = vec![Tree::ROOT];
+    while let Some(dir) = pending.pop() {
+        let children = tree.children(dir);
+        for id in children.clone() {
+            if let Some(&key) = links.get(&id)
+                && !seen.insert(key)
+            {
+                tree.clear_size(id);
+            }
+        }
+        // 스택이므로 역순으로 넣어야 이름순으로 꺼내진다.
+        pending.extend(children.rev().filter(|&id| tree.node(id).kind == NodeKind::Dir));
+    }
 }
 
 /// 실제 디스크 점유량. `st_blocks`의 단위는 항상 512바이트다.

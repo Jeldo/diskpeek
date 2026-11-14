@@ -103,7 +103,13 @@ impl Tree {
         self.nodes.len()
     }
 
-    fn children(&self, id: NodeId) -> Range<NodeId> {
+    /// 자신의 크기를 0으로 만든다. `finalize` 전에만 쓴다.
+    pub(crate) fn clear_size(&mut self, id: NodeId) {
+        self.nodes[id as usize].size = 0;
+    }
+
+    /// 자식들의 id. 추가한 순서 그대로다.
+    pub(crate) fn children(&self, id: NodeId) -> Range<NodeId> {
         let node = self.node(id);
         node.first_child..node.first_child + node.child_count
     }

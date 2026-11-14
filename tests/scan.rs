@@ -110,6 +110,32 @@ fn hard_link_counted_once() {
 }
 
 #[test]
+fn hard_link_is_credited_to_the_same_path_every_time() {
+    let (_tmp, root) = temp_root();
+    // 폴더 단위로 깊이 우선이므로 `a/z`가 `a/b/c`보다 먼저다.
+    write(&root, "a/z", MIB);
+    fs::create_dir(root.join("a/b")).unwrap();
+    fs::hard_link(root.join("a/z"), root.join("a/b/c")).unwrap();
+    // 여러 폴더에 흩어진 링크는 이름순으로 첫 폴더에 계산된다.
+    write(&root, "d00/f", MIB);
+    for i in 1..20 {
+        fs::create_dir(root.join(format!("d{i:02}"))).unwrap();
+        fs::hard_link(root.join("d00/f"), root.join(format!("d{i:02}/f"))).unwrap();
+    }
+
+    for _ in 0..10 {
+        let t = scan_ok(&root, &root);
+        assert!(find(&t, "a/z").size >= MIB as u64);
+        assert_eq!(find(&t, "a/b/c").size, 0);
+        assert!(find(&t, "d00/f").size >= MIB as u64);
+        for i in 1..20 {
+            assert_eq!(find(&t, &format!("d{i:02}/f")).size, 0);
+        }
+        assert_eq!(t.node(Tree::ROOT).size, du_bytes(&root));
+    }
+}
+
+#[test]
 fn unreadable_dir_is_skipped() {
     let (_tmp, root) = temp_root();
     write(&root, "locked/secret", 4 * KIB);
