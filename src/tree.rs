@@ -98,6 +98,11 @@ impl Tree {
         &self.nodes[id as usize]
     }
 
+    /// 루트를 포함한 전체 노드 수.
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
     fn children(&self, id: NodeId) -> Range<NodeId> {
         let node = self.node(id);
         node.first_child..node.first_child + node.child_count
@@ -293,6 +298,11 @@ mod tests {
         );
         assert_eq!(names(&t, &t.largest_files(2)), ["movie.mov", "notes.md"]);
         assert!(t.largest_files(0).is_empty());
+    }
+
+    #[test]
+    fn node_count_includes_root() {
+        assert_eq!(sample().node_count(), 12);
     }
 
     #[test]
