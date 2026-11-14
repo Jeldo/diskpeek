@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use storage_manager::classify::{Category, classify};
+use storage_analyzer::classify::{Category, classify};
 
 fn mkdir(home: &Path, rel: &str) -> PathBuf {
     let dir = home.join(rel);

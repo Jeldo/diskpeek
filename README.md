@@ -1,4 +1,4 @@
-# storage-manager
+# storage-analyzer
 
 macOS에서 어떤 파일과 폴더가 저장공간을 차지하는지 터미널에서 보여주는 분석 도구입니다.
 
@@ -17,7 +17,7 @@ cargo run --release -- <경로>    # 지정한 폴더를 스캔
 
 ```sh
 cargo install --path .
-storage-manager ~/Github
+storage-analyzer ~/Github
 ```
 
 실행할 때마다 처음부터 스캔하고 결과를 저장하지 않습니다. 실행 중에 파일이 바뀐 것은 자동으로 반영되지 않으며, `r`을 누르면 다시 스캔합니다. 스캔하는 동안에는 읽은 파일 수와 용량이 표시됩니다. 폴더는 스레드 4개로 나눠 읽으며, 최근에 읽은 적이 있는 폴더는 약 15만 개에 1초 안팎이 걸리고 처음 읽을 때는 더 걸립니다.

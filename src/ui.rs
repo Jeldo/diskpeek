@@ -12,7 +12,7 @@ use crate::classify::Category;
 use crate::format::{bar, display_path, format_size};
 use crate::tree::{NodeId, NodeKind};
 
-const TITLE: &str = " storage-manager  ";
+const TITLE: &str = " storage-analyzer  ";
 
 /// 화면 아래에 보여주는 (키, 설명) 안내. 가장 넓은 것이 80칸에 들어가야 한다.
 type Keys = &'static [(&'static str, &'static str)];
@@ -313,7 +313,7 @@ mod tests {
         let s = screen(&app, 100, 20);
         assert_contains(
             &s,
-            &["storage-manager", "~", "movie.mov", "proj/", "9.0MB", "합계17.0MB", "정리후보8.0MB", "q종료"],
+            &["storage-analyzer", "~", "movie.mov", "proj/", "9.0MB", "합계17.0MB", "정리후보8.0MB", "q종료"],
         );
         assert!(!s.contains("건너뜀"));
         assert!(!s.contains("movie.mov/"));
@@ -481,7 +481,7 @@ mod tests {
     #[test]
     fn progress_screen() {
         let s = rendered(80, 10, |frame| draw_progress(frame, "~/x", 1234, 5_000_000));
-        assert_contains(&s, &["storage-manager", "스캔중", "~/x", "파일1234개", "5.0MB", "q종료"]);
+        assert_contains(&s, &["storage-analyzer", "스캔중", "~/x", "파일1234개", "5.0MB", "q종료"]);
     }
 
     #[test]
