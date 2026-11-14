@@ -5,7 +5,7 @@
 
 use std::cmp::Reverse;
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::classify::Category;
 
@@ -134,6 +134,21 @@ impl Tree {
         let mut path = self.root_path.clone();
         path.extend(names.into_iter().rev());
         path
+    }
+
+    /// `path`를 따라 내려가며 찾은 가장 깊은 노드와, `path` 끝까지 찾았는지를 돌려준다.
+    /// `path`가 루트 밖이면 루트를 돌려준다.
+    pub fn locate(&self, path: &Path) -> (NodeId, bool) {
+        let Ok(rest) = path.strip_prefix(&self.root_path) else { return (Self::ROOT, false) };
+        let mut current = Self::ROOT;
+        for name in rest {
+            let name = name.to_string_lossy();
+            match self.children(current).find(|&id| *self.node(id).name == *name) {
+                Some(child) => current = child,
+                None => return (current, false),
+            }
+        }
+        (current, true)
     }
 
     /// 정리 후보를 종류 순서, 그 안에서 크기 내림차순(같으면 경로 오름차순)으로 돌려준다.

@@ -13,9 +13,21 @@ use crate::format::{bar, display_path, format_size};
 use crate::tree::{NodeId, NodeKind};
 
 const TITLE: &str = " storage-manager  ";
-const BROWSE_KEYS: &str = "↑↓ 이동   Enter 들어가기   Esc 상위   c 정리 후보   f 큰 파일   q 종료";
-const CANDIDATE_KEYS: &str = "↑↓ 이동   Enter 해당 위치로 이동   Esc 탐색으로 돌아가기   q 종료";
-const LARGE_FILE_KEYS: &str = "↑↓ 이동   Enter 해당 위치로 이동   Esc 탐색으로 돌아가기   q 종료";
+
+/// 화면 아래에 보여주는 (키, 설명) 안내. 가장 넓은 것이 80칸에 들어가야 한다.
+type Keys = &'static [(&'static str, &'static str)];
+const BROWSE_KEYS: Keys = &[
+    ("↑↓", "이동"),
+    ("Enter", "들어가기"),
+    ("Esc", "상위"),
+    ("c", "정리 후보"),
+    ("f", "큰 파일"),
+    ("r", "다시 스캔"),
+    ("q", "종료"),
+];
+const COLLECTED_KEYS: Keys =
+    &[("↑↓", "이동"), ("Enter", "해당 위치로 이동"), ("Esc", "돌아가기"), ("r", "다시 스캔"), ("q", "종료")];
+const PROGRESS_KEYS: Keys = &[("q", "종료")];
 
 /// 크기 칸의 폭. "999.9 GB"보다 넉넉하게 잡는다.
 const SIZE_WIDTH: usize = 10;
@@ -34,6 +46,7 @@ pub fn action_for(key: KeyEvent) -> Option<Action> {
         KeyCode::Esc | KeyCode::Left | KeyCode::Backspace => Some(Action::Back),
         KeyCode::Char('c' | 'C' | 'ㅊ') => Some(Action::ToggleCandidates),
         KeyCode::Char('f' | 'F' | 'ㄹ') => Some(Action::ToggleLargeFiles),
+        KeyCode::Char('r' | 'R' | 'ㄱ') => Some(Action::Rescan),
         KeyCode::Char('q' | 'Q' | 'ㅂ') => Some(Action::Quit),
         _ => None,
     }
@@ -70,19 +83,19 @@ pub fn draw(frame: &mut Frame, app: &App) {
             let summary = format!("합계 {} · {count}개", format_size(app.tree.candidate_total()));
             draw_header(frame, header, "정리 후보", &summary);
             draw_candidates(frame, body, app);
-            CANDIDATE_KEYS
+            COLLECTED_KEYS
         }
         View::LargeFiles => {
             let summary = format!("상위 {}개", app.large_files.len());
             draw_header(frame, header, "큰 파일", &summary);
             draw_large_files(frame, body, app);
-            LARGE_FILE_KEYS
+            COLLECTED_KEYS
         }
     };
 
     draw_rule(frame, top_rule);
     draw_rule(frame, bottom_rule);
-    frame.render_widget(Paragraph::new(format!("  {keys}")).style(dim()), footer);
+    frame.render_widget(key_line(keys), footer);
 }
 
 pub fn draw_progress(frame: &mut Frame, root: &str, files: u64, bytes: u64) {
@@ -92,7 +105,7 @@ pub fn draw_progress(frame: &mut Frame, root: &str, files: u64, bytes: u64) {
         Line::from(format!("  스캔 중… {root}")),
         Line::from(format!("  파일 {files}개 · {}", format_size(bytes))),
         Line::default(),
-        Line::from(Span::styled("  q 종료", dim())),
+        key_line(PROGRESS_KEYS),
     ];
     frame.render_widget(Paragraph::new(lines), frame.area());
 }
@@ -107,6 +120,18 @@ fn draw_header(frame: &mut Frame, area: Rect, context: &str, summary: &str) {
     let title = Line::from(vec![Span::styled(TITLE, bold()), Span::raw(fit_end(context, context_width))]);
     frame.render_widget(title, left);
     frame.render_widget(summary, right);
+}
+
+/// 키 안내 한 줄. 어떤 터미널 테마에서도 읽히도록 키는 반전시키고 설명은 기본 글자색으로 쓴다.
+fn key_line(keys: Keys) -> Line<'static> {
+    let mut spans = Vec::new();
+    for &(key, label) in keys {
+        let gap = if spans.is_empty() { " " } else { "  " };
+        spans.push(Span::raw(gap));
+        spans.push(Span::styled(key, Style::new().add_modifier(Modifier::REVERSED)));
+        spans.push(Span::raw(format!(" {label}")));
+    }
+    Line::from(spans)
 }
 
 fn draw_rule(frame: &mut Frame, area: Rect) {
@@ -303,9 +328,47 @@ mod tests {
         let mut app = app();
         assert_contains(&screen(&app, 100, 20), &["Esc상위"]);
         press(&mut app, &[ToggleCandidates]);
-        assert_contains(&screen(&app, 100, 20), &["Esc탐색으로돌아가기"]);
+        assert_contains(&screen(&app, 100, 20), &["Esc돌아가기"]);
         press(&mut app, &[ToggleLargeFiles]);
-        assert_contains(&screen(&app, 100, 20), &["Esc탐색으로돌아가기"]);
+        assert_contains(&screen(&app, 100, 20), &["Esc돌아가기"]);
+    }
+
+    #[test]
+    fn footers_fit_in_80_columns() {
+        let mut app = app();
+        assert_contains(&screen(&app, 80, 20), &["↑↓이동", "Enter들어가기", "c정리후보", "f큰파일", "r다시스캔", "q종료"]);
+        press(&mut app, &[ToggleCandidates]);
+        assert_contains(&screen(&app, 80, 20), &["Enter해당위치로이동", "r다시스캔", "q종료"]);
+        press(&mut app, &[ToggleLargeFiles]);
+        assert_contains(&screen(&app, 80, 20), &["Enter해당위치로이동", "r다시스캔", "q종료"]);
+    }
+
+    /// 마지막 줄에서 `symbol`이 그려진 첫 칸의 스타일.
+    fn footer_style(w: u16, h: u16, render: impl FnOnce(&mut Frame), symbol: &str) -> Style {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(render).unwrap();
+        let buffer = terminal.backend().buffer();
+        let cell = (0..w).map(|x| &buffer[(x, h - 1)]).find(|cell| cell.symbol() == symbol);
+        cell.unwrap_or_else(|| panic!("{symbol:?} not in the last line")).style()
+    }
+
+    #[test]
+    fn footer_keys_are_highlighted_and_labels_use_the_normal_text_color() {
+        let app = app();
+        for key in ["↑", "E", "c", "f", "r", "q"] {
+            let style = footer_style(100, 20, |frame| draw(frame, &app), key);
+            assert!(style.add_modifier.contains(Modifier::REVERSED), "{key} is not highlighted");
+        }
+        for label in ["이", "들", "정", "큰", "다", "종"] {
+            let style = footer_style(100, 20, |frame| draw(frame, &app), label);
+            assert!(!style.add_modifier.contains(Modifier::REVERSED), "{label} is highlighted");
+            assert_eq!(style.fg, Some(Color::Reset), "{label} is not in the normal text color");
+        }
+
+        // 스캔 중 화면의 안내도 같은 모양이다. 안내는 6번째 줄에 있다.
+        let progress = |frame: &mut Frame| draw_progress(frame, "~/x", 1, 1);
+        assert!(footer_style(80, 6, progress, "q").add_modifier.contains(Modifier::REVERSED));
+        assert_eq!(footer_style(80, 6, progress, "종").fg, Some(Color::Reset));
     }
 
     #[test]
@@ -336,7 +399,7 @@ mod tests {
                 "3.0MB~/Library/Caches",
                 "빌드산출물",
                 "5.0MB~/proj/node_modules",
-                "탐색으로돌아가기",
+                "Esc돌아가기",
             ],
         );
     }
@@ -353,7 +416,7 @@ mod tests {
         let mut app = app();
         press(&mut app, &[ToggleLargeFiles]);
         let s = screen(&app, 100, 20);
-        assert_contains(&s, &["큰파일", "상위4개", "9.0MB~/movie.mov", "~/proj/main.rs", "탐색으로돌아가기"]);
+        assert_contains(&s, &["큰파일", "상위4개", "9.0MB~/movie.mov", "~/proj/main.rs", "Esc돌아가기"]);
         assert!(!s.contains("big.bin"));
     }
 
@@ -448,6 +511,8 @@ mod tests {
         assert_eq!(key(KeyCode::Char('c')), Some(ToggleCandidates));
         assert_eq!(key(KeyCode::Char('f')), Some(ToggleLargeFiles));
         assert_eq!(key(KeyCode::Char('q')), Some(Quit));
+        assert_eq!(key(KeyCode::Char('r')), Some(Rescan));
+        assert_eq!(key(KeyCode::Char('ㄱ')), Some(Rescan));
         assert_eq!(key(KeyCode::Char('x')), None);
         // 한글 입력 상태에서 같은 자리의 키를 눌렀을 때 (두벌식)
         assert_eq!(key(KeyCode::Char('ㅊ')), Some(ToggleCandidates));
@@ -458,6 +523,7 @@ mod tests {
         // Caps Lock이나 Shift가 눌린 상태
         let shifted = |ch| action_for(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::SHIFT));
         assert_eq!(shifted('C'), Some(ToggleCandidates));
+        assert_eq!(shifted('R'), Some(Rescan));
         assert_eq!(shifted('F'), Some(ToggleLargeFiles));
         assert_eq!(shifted('Q'), Some(Quit));
         assert_eq!(shifted('J'), Some(Down));

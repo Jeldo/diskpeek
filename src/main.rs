@@ -67,6 +67,12 @@ fn run(terminal: &mut DefaultTerminal, root: &Path, home: PathBuf) -> io::Result
         if let Some(action) = read_action()? {
             app.handle(action);
         }
+        if app.wants_rescan {
+            let Some(tree) = scan_with_progress(terminal, root, &app.home)? else {
+                return Ok(());
+            };
+            app.replace_tree(tree);
+        }
     }
     Ok(())
 }

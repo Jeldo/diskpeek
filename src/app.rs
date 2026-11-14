@@ -1,6 +1,7 @@
 //! 화면 상태와 키 동작. 터미널과 무관하다.
 
-use std::path::PathBuf;
+use std::mem;
+use std::path::{Path, PathBuf};
 
 use crate::classify::Category;
 use crate::tree::{NodeId, NodeKind, Tree};
@@ -23,6 +24,7 @@ pub enum Action {
     Back,
     ToggleCandidates,
     ToggleLargeFiles,
+    Rescan,
     Quit,
 }
 
@@ -39,6 +41,8 @@ pub struct App {
     pub home: PathBuf,
     pub view: View,
     pub should_quit: bool,
+    /// 다시 스캔해 달라는 요청. 새 트리를 `replace_tree`로 넘기면 지워진다.
+    pub wants_rescan: bool,
 
     /// 탐색 화면: 현재 폴더, 그 자식들(크기순), 선택한 줄.
     pub cwd: NodeId,
@@ -64,6 +68,7 @@ impl App {
             home,
             view: View::Browse,
             should_quit: false,
+            wants_rescan: false,
             cwd: Tree::ROOT,
             items,
             selected: 0,
@@ -78,12 +83,67 @@ impl App {
     pub fn handle(&mut self, action: Action) {
         match action {
             Action::Quit => self.should_quit = true,
+            Action::Rescan => self.wants_rescan = true,
             Action::ToggleCandidates => self.toggle(View::Candidates),
             Action::ToggleLargeFiles => self.toggle(View::LargeFiles),
             Action::Up => self.move_selection(false),
             Action::Down => self.move_selection(true),
             Action::Enter => self.enter(),
             Action::Back => self.back(),
+        }
+    }
+
+    /// 다시 스캔한 트리로 바꾼다. 보던 화면과 선택한 항목을 되도록 유지한다.
+    pub fn replace_tree(&mut self, tree: Tree) {
+        // 이전 트리의 id는 새 트리에서 쓸 수 없으므로 위치를 경로로 옮긴다.
+        let cwd = self.tree.path(self.cwd);
+        let selected = self.items.get(self.selected).map(|&id| self.tree.path(id));
+        let candidate = match self.candidate_rows.get(self.candidate_selected) {
+            Some(&Row::Item(id)) => Some(self.tree.path(id)),
+            _ => None,
+        };
+        let large_file = self.large_files.get(self.large_selected).map(|&id| self.tree.path(id));
+
+        let next = App::new(tree, self.home.clone());
+        let old = mem::replace(self, next);
+
+        match self.find(selected.as_deref()) {
+            Some(target) => self.reveal(target),
+            None => {
+                // 선택한 항목이 사라졌으면 보던 폴더에, 그 폴더도 사라졌으면 남아 있는
+                // 가장 가까운 상위 폴더에 머문다.
+                let (mut folder, _) = self.tree.locate(&cwd);
+                if self.tree.node(folder).kind != NodeKind::Dir {
+                    folder = self.tree.node(folder).parent.unwrap_or(Tree::ROOT);
+                }
+                self.cwd = folder;
+                self.items = self.tree.children_by_size(folder);
+                self.selected = old.selected.min(self.items.len().saturating_sub(1));
+            }
+        }
+        self.view = old.view;
+
+        let candidate = self.find(candidate.as_deref());
+        self.candidate_selected = candidate
+            .and_then(|id| self.candidate_rows.iter().position(|&row| row == Row::Item(id)))
+            .unwrap_or_else(|| {
+                // 같은 자리가 묶음 제목이면 바로 아래 항목을 고른다. 제목 다음에는 항상 항목이 있다.
+                let index = old.candidate_selected.min(self.candidate_rows.len().saturating_sub(1));
+                let on_header = matches!(self.candidate_rows.get(index), Some(Row::Header { .. }));
+                if on_header { index + 1 } else { index }
+            });
+
+        let large_file = self.find(large_file.as_deref());
+        self.large_selected = large_file
+            .and_then(|id| self.large_files.iter().position(|&file| file == id))
+            .unwrap_or(old.large_selected.min(self.large_files.len().saturating_sub(1)));
+    }
+
+    /// 이전 트리의 경로가 지금 트리에도 있으면 그 노드를 돌려준다.
+    fn find(&self, path: Option<&Path>) -> Option<NodeId> {
+        match self.tree.locate(path?) {
+            (id, true) => Some(id),
+            (_, false) => None,
         }
     }
 
@@ -394,6 +454,152 @@ mod tests {
         assert_eq!(app.large_files.len(), LARGE_FILE_LIMIT);
         assert_eq!(LARGE_FILE_LIMIT, 100);
         assert_eq!(&*app.tree.node(app.large_files[99]).name, "f099");
+    }
+
+    /// `sample()`에서 `proj/main.rs`와 `movie.mov`만 남은 트리.
+    fn smaller() -> Tree {
+        let n = |name: &str, kind, size| NewNode { name: name.into(), kind, size, category: None };
+        let mut tree = Tree::new(PathBuf::from("/home/u"), 0);
+        let top = tree.add_children(
+            Tree::ROOT,
+            vec![n("proj", NodeKind::Dir, 0), n("movie.mov", NodeKind::File, 9_000_000)],
+        );
+        tree.add_children(top.start, vec![n("main.rs", NodeKind::File, 2_000)]);
+        tree.finalize();
+        tree
+    }
+
+    /// 루트 바로 아래에 `(이름, 크기, 종류)` 항목만 있는 트리. 종류가 있으면 폴더다.
+    fn flat(entries: &[(&str, u64, Option<Category>)]) -> Tree {
+        let children = entries
+            .iter()
+            .map(|&(name, size, category)| NewNode {
+                name: name.into(),
+                kind: if category.is_some() { NodeKind::Dir } else { NodeKind::File },
+                size,
+                category,
+            })
+            .collect();
+        let mut tree = Tree::new(PathBuf::from("/home/u"), 0);
+        tree.add_children(Tree::ROOT, children);
+        tree.finalize();
+        tree
+    }
+
+    #[test]
+    fn rescan_is_requested_and_cleared() {
+        let mut app = app();
+        assert!(!app.wants_rescan);
+        press(&mut app, &[Rescan]);
+        assert!(app.wants_rescan);
+        assert!(!app.should_quit);
+
+        app.replace_tree(sample());
+        assert!(!app.wants_rescan);
+    }
+
+    #[test]
+    fn replace_tree_keeps_folder_and_selection() {
+        let mut app = app();
+        press(&mut app, &[Down, Enter, Down]);
+        assert_eq!(selected_name(&app), "main.rs");
+
+        app.replace_tree(sample());
+        assert_eq!(app.view, View::Browse);
+        assert_eq!(app.cwd, find(&app.tree, "proj"));
+        assert_eq!(selected_name(&app), "main.rs");
+
+        // 다른 항목이 사라져 순서가 바뀌어도 같은 항목을 따라간다.
+        app.replace_tree(smaller());
+        assert_eq!(app.cwd, find(&app.tree, "proj"));
+        assert_eq!(selected_name(&app), "main.rs");
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn replace_tree_keeps_position_when_selected_item_is_gone() {
+        let mut app = app();
+        press(&mut app, &[Down, Enter, Down, Down]);
+        assert_eq!(selected_name(&app), "package.json");
+
+        app.replace_tree(smaller());
+        assert_eq!(app.cwd, find(&app.tree, "proj"));
+        assert_eq!(names(&app.tree, &app.items), ["main.rs"]);
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn replace_tree_moves_up_when_folder_is_gone() {
+        let mut app = app();
+        press(&mut app, &[Down, Enter, Enter]);
+        assert_eq!(app.cwd, find(&app.tree, "proj/node_modules"));
+        app.replace_tree(smaller());
+        assert_eq!(app.cwd, find(&app.tree, "proj"));
+        assert!(app.selected < app.items.len());
+
+        let mut app = App::new(sample(), PathBuf::from("/home/u"));
+        press(&mut app, &[Down, Down, Enter, Enter]);
+        assert_eq!(app.cwd, find(&app.tree, "Library/Caches"));
+        app.replace_tree(smaller());
+        assert_eq!(app.cwd, Tree::ROOT);
+        assert!(app.selected < app.items.len());
+    }
+
+    #[test]
+    fn replace_tree_with_empty_tree_is_safe() {
+        let mut app = app();
+        press(&mut app, &[Down, Enter, Down]);
+        app.replace_tree(flat(&[]));
+        assert_eq!(app.cwd, Tree::ROOT);
+        assert!(app.items.is_empty());
+        assert_eq!(app.selected, 0);
+        press(&mut app, &[Up, Down, Enter, Back, ToggleCandidates, Down, Enter, ToggleLargeFiles, Down, Enter]);
+    }
+
+    #[test]
+    fn replace_tree_keeps_candidate_selection() {
+        let cache = Some(Category::Cache);
+        let build = Some(Category::Build);
+        let mut app = App::new(
+            flat(&[("c1", 30, cache), ("c2", 20, cache), ("b1", 10, build)]),
+            PathBuf::from("/home/u"),
+        );
+        press(&mut app, &[ToggleCandidates, Down]);
+        assert_eq!(app.candidate_rows[app.candidate_selected], Row::Item(find(&app.tree, "c2")));
+
+        // 크기 순서가 바뀌어도 같은 후보를 따라간다.
+        app.replace_tree(flat(&[("c1", 30, cache), ("c2", 40, cache), ("b1", 10, build)]));
+        assert_eq!(app.view, View::Candidates);
+        assert_eq!(app.candidate_selected, 1);
+        assert_eq!(app.candidate_rows[1], Row::Item(find(&app.tree, "c2")));
+
+        // 선택한 후보가 사라지면 같은 자리 근처의 항목을 고른다. 묶음 제목은 고르지 않는다.
+        press(&mut app, &[Down]);
+        assert_eq!(app.candidate_selected, 2);
+        app.replace_tree(flat(&[("c2", 40, cache), ("b1", 10, build)]));
+        assert_eq!(app.candidate_rows[app.candidate_selected], Row::Item(find(&app.tree, "b1")));
+
+        app.replace_tree(flat(&[("f", 5, None)]));
+        assert!(app.candidate_rows.is_empty());
+        assert_eq!(app.candidate_selected, 0);
+    }
+
+    #[test]
+    fn replace_tree_keeps_large_file_selection() {
+        let mut app =
+            App::new(flat(&[("f1", 30, None), ("f2", 20, None), ("f3", 10, None)]), PathBuf::from("/home/u"));
+        press(&mut app, &[ToggleLargeFiles, Down]);
+        assert_eq!(app.large_files[app.large_selected], find(&app.tree, "f2"));
+
+        app.replace_tree(flat(&[("f1", 30, None), ("f2", 40, None), ("f3", 10, None)]));
+        assert_eq!(app.view, View::LargeFiles);
+        assert_eq!(app.large_selected, 0);
+        assert_eq!(app.large_files[0], find(&app.tree, "f2"));
+
+        press(&mut app, &[Down, Down]);
+        assert_eq!(app.large_selected, 2);
+        app.replace_tree(flat(&[("f1", 30, None)]));
+        assert_eq!(app.large_selected, 0);
     }
 
     #[test]
